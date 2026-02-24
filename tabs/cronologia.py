@@ -1,31 +1,19 @@
 """
-tab_cronologia.py — IFControll v3.4
+tab_cronologia.py — IFControll v3.5
 
 Cronologia de Manutenções.
 
-CORREÇÕES v3.4 (em relação à v3.3):
-  ─ Removido uso de global para CRON_API_URL / CRON_API_KEY:
-      as funções lêem as variáveis sempre no momento da chamada
-      via módulo de credenciais.
-  ─ Eliminado race condition na paginação: limit/offset são capturados
-      antes de entrarem na thread.
-  ─ _make_scrollable: bind_all apenas enquanto o mouse está sobre o canvas
-      (comportamento já correto na v3.3, mas agora com unbind garantido).
-  ─ _buscar: pré-validação do campo placa antes de disparar a thread.
-  ─ _salvar_edicao: campo 'custo' lida com vírgula corretamente.
-  ─ _criar_manutencao: limpa os campos APÓS confirmar o sucesso da API
-      (evita perda de dados se a rede falhar).
-  ─ _listar_placas: a inserção na árvore agora exibe a placa na coluna
-      correta sem strings de preenchimento "—" em todas as outras colunas.
-  ─ Toda operação que mostra messagebox a partir de thread usa self.after().
-  ─ _placas_do_cliente_selecionado: fallback de consulta online apenas
-      quando o cache local está vazio E após limpar duplicatas.
-  ─ _recolor chamado na construção do estilo inicial para garantir
-      consistência de cores desde o primeiro render.
-  ─ Adicionada constante _TREE_COLS para evitar repetição da definição
-      das colunas da árvore principal.
-  ─ Melhorias de UX: mensagens de feedback mais claras; foco automático
-      no campo placa ao abrir a aba; tooltip visual de carregamento.
+NOVIDADES v3.5 (em relação à v3.4):
+  ─ Comboboxes de Cliente e Placa agora são editáveis/filtráveis:
+      o usuário pode digitar para filtrar a lista em tempo real.
+  ─ Botão "Carregar por Situação": abre um popup com as situações
+      padrão (Visita Técnica, Oficina, Garagem, Sinistro, GPS,
+      Instalação, Outros). "Outros" carrega tudo fora das situações
+      padrão. A lista é mesclada com situações já cadastradas no banco.
+  ─ Campo "ID do Rastreador" adicionado em Nova Manutenção,
+      Detalhe/Edição e nas colunas da árvore principal.
+  ─ _cron_get "situacoes" carrega lista de situações da API na
+      abertura da aba para popular o popup.
 """
 
 import threading
@@ -38,7 +26,6 @@ from tkinter import ttk, messagebox, filedialog
 import requests
 
 # ── Importações internas ─────────────────────────────────────────────────────
-# Lidas sob demanda (late import) para respeitar possíveis recargas do módulo
 import core.credencials as _cred
 from core.api import get_clients_all, get_all_events
 from core.models import safe_str as _safe_str_model
@@ -46,14 +33,27 @@ from utils.theme_manager import C, register_theme_listener
 from widgets.alert_colors import _ac
 
 # ─────────────────────────────────────────────────────────────────────────────
-# COLUNAS DA ÁRVORE PRINCIPAL
+# SITUAÇÕES PADRÃO (espelho do PHP para uso offline/fallback)
+# ─────────────────────────────────────────────────────────────────────────────
+_SITUACOES_PADRAO = [
+    "Visita Técnica",
+    "Oficina",
+    "Garagem",
+    "Sinistro",
+    "GPS",
+    "Instalação",
+    "Outros",
+]
+
+# ─────────────────────────────────────────────────────────────────────────────
+# COLUNAS DA ÁRVORE PRINCIPAL  (rastreador_id adicionado após Placa)
 # ─────────────────────────────────────────────────────────────────────────────
 _TREE_COLS = (
-    "ID", "Placa", "Situação", "Data Cadastro", "Criado Por",
+    "ID", "Placa", "Rastreador", "Situação", "Data Cadastro", "Criado Por",
     "Quem Informou", "Onde Está", "Status Atual",
     "Categoria", "Prioridade", "Custo", "Previsão", "Conclusão", "✔",
 )
-_TREE_WIDTHS = (50, 80, 160, 130, 120, 120, 140, 200, 110, 100, 80, 110, 110, 40)
+_TREE_WIDTHS = (50, 80, 100, 160, 130, 120, 120, 140, 200, 110, 100, 80, 110, 110, 40)
 _TREE_NCOLS  = len(_TREE_COLS)
 
 
@@ -62,12 +62,10 @@ _TREE_NCOLS  = len(_TREE_COLS)
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _cron_url() -> str:
-    """URL da API lida sempre em tempo de execução (reflete mudanças no painel)."""
     return getattr(_cred, "CRON_API_URL", "")
 
 
 def _cron_key() -> str:
-    """Token da API lido sempre em tempo de execução."""
     return getattr(_cred, "CRON_API_KEY", "")
 
 
@@ -80,7 +78,6 @@ def _cron_headers() -> dict:
 
 def _cron_req(method: str, path: str, params: dict | None = None,
               body: dict | None = None, timeout: int = 15):
-    """Executa uma requisição e retorna (data_dict, http_status_code)."""
     try:
         query = {"path": path}
         if params:
@@ -180,7 +177,6 @@ def _btn2(parent, text: str, cmd, bg: str | None = None,
 
 
 def _txtbox(parent, h: int = 5):
-    """Retorna (frame, Text) — Text começa desabilitado."""
     fr = tk.Frame(parent, bg=C["surface2"], highlightthickness=1,
                   highlightbackground=C["border"])
     t = tk.Text(
@@ -201,7 +197,6 @@ def _txtbox(parent, h: int = 5):
 
 
 def _write(text_widget, text: str, col: str | None = None) -> None:
-    """Atualiza um widget Text desabilitado. Thread-safe quando chamado via after()."""
     text_widget.config(state="normal")
     text_widget.delete("1.0", "end")
     text_widget.config(fg=col or C["text"])
@@ -210,11 +205,6 @@ def _write(text_widget, text: str, col: str | None = None) -> None:
 
 
 def _make_scrollable(parent):
-    """
-    Cria um frame rolável dentro de parent.
-    Retorna (canvas, inner_frame).
-    O scroll do mouse é vinculado localmente ao canvas.
-    """
     canvas = tk.Canvas(parent, bg=C["bg"], highlightthickness=0)
     vsb = tk.Scrollbar(parent, orient="vertical", command=canvas.yview)
     canvas.configure(yscrollcommand=vsb.set)
@@ -240,6 +230,212 @@ def _make_scrollable(parent):
     canvas.bind("<Leave>", lambda _e: canvas.unbind_all("<MouseWheel>"))
 
     return canvas, inner
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# COMBOBOX FILTRÁVEL
+# Substitui ttk.Combobox com comportamento de auto-filtro ao digitar.
+# ─────────────────────────────────────────────────────────────────────────────
+
+class FilterableCombobox(tk.Frame):
+    """
+    Combobox que filtra a lista de opções em tempo real conforme o usuário digita.
+    Interface compatível com ttk.Combobox: .get(), .set(), .__getitem__/__setitem__
+    para 'values', e evento <<ComboboxSelected>> disparado ao confirmar seleção.
+    """
+
+    def __init__(self, parent, values: list | None = None, width: int = 20,
+                 state: str = "normal", font=("Helvetica Neue", 9), **kw):
+        super().__init__(parent, bg=C["bg"], **kw)
+        self._all_values: list[str] = list(values or [])
+        self._popup: tk.Toplevel | None = None
+        self._listbox: tk.Listbox | None = None
+        self._after_id = None
+
+        self._var = tk.StringVar()
+        self._entry = tk.Entry(
+            self, textvariable=self._var, width=width,
+            bg=C["surface3"], fg=C["text"],
+            insertbackground=C["accent"],
+            relief="flat", highlightthickness=1,
+            highlightbackground=C["border"],
+            highlightcolor=C["accent"],
+            font=font,
+            state=("readonly" if state == "readonly" else "normal"),
+        )
+        self._entry.pack(side="left", fill="x", expand=True, ipady=3)
+
+        # Botão seta
+        self._arrow = tk.Label(
+            self, text="▾", bg=C["surface3"], fg=C["text_mid"],
+            font=("Helvetica Neue", 9), cursor="hand2", padx=4,
+        )
+        self._arrow.pack(side="left")
+        self._arrow.bind("<Button-1>", self._toggle_popup)
+
+        self._var.trace_add("write", self._on_type)
+        self._entry.bind("<Down>",       self._focus_list)
+        self._entry.bind("<Return>",     self._on_entry_return)
+        self._entry.bind("<FocusOut>",   self._on_focus_out)
+        self._entry.bind("<Button-1>",   self._on_entry_click)
+
+    # ── API pública ────────────────────────────────────────────────────────
+
+    def get(self) -> str:
+        return self._var.get()
+
+    def set(self, value: str):
+        self._var.set(value)
+
+    def __getitem__(self, key):
+        if key == "values":
+            return self._all_values
+        return super().__getitem__(key)
+
+    def __setitem__(self, key, value):
+        if key == "values":
+            self._all_values = list(value)
+            if self._listbox:
+                self._refresh_listbox(self._filter_values(self._var.get()))
+        else:
+            super().__setitem__(key, value)
+
+    def config(self, **kw):
+        if "values" in kw:
+            self._all_values = list(kw.pop("values"))
+        if kw:
+            self._entry.config(**kw)
+
+    # ── Filtro ────────────────────────────────────────────────────────────
+
+    def _filter_values(self, text: str) -> list[str]:
+        text = text.strip().lower()
+        if not text:
+            return self._all_values
+        return [v for v in self._all_values if text in v.lower()]
+
+    def _on_type(self, *_):
+        if self._after_id:
+            self.after_cancel(self._after_id)
+        self._after_id = self.after(120, self._update_popup)
+
+    def _update_popup(self):
+        filtered = self._filter_values(self._var.get())
+        if not self._popup or not self._popup.winfo_exists():
+            if filtered:
+                self._open_popup(filtered)
+        else:
+            self._refresh_listbox(filtered)
+
+    # ── Popup ─────────────────────────────────────────────────────────────
+
+    def _toggle_popup(self, _e=None):
+        if self._popup and self._popup.winfo_exists():
+            self._close_popup()
+        else:
+            self._open_popup(self._filter_values(self._var.get()))
+
+    def _open_popup(self, values: list[str]):
+        if not values:
+            return
+        if self._popup and self._popup.winfo_exists():
+            self._refresh_listbox(values)
+            return
+
+        self._popup = tk.Toplevel(self)
+        self._popup.overrideredirect(True)
+        self._popup.configure(bg=C["border"])
+
+        # Posiciona sob o entry
+        self.update_idletasks()
+        x = self.winfo_rootx()
+        y = self.winfo_rooty() + self.winfo_height()
+        w = self.winfo_width()
+        h = min(220, len(values) * 22 + 4)
+        self._popup.geometry(f"{w}x{h}+{x}+{y}")
+        self._popup.lift()
+
+        fr = tk.Frame(self._popup, bg=C["surface2"])
+        fr.pack(fill="both", expand=True, padx=1, pady=1)
+
+        sb = tk.Scrollbar(fr, bg=C["surface3"], troughcolor=C["bg"], relief="flat")
+        sb.pack(side="right", fill="y")
+
+        self._listbox = tk.Listbox(
+            fr,
+            bg=C["surface2"], fg=C["text"],
+            selectbackground=C["accent2"],
+            activestyle="none",
+            relief="flat", bd=0,
+            font=("Helvetica Neue", 9),
+            yscrollcommand=sb.set,
+        )
+        self._listbox.pack(fill="both", expand=True)
+        sb.config(command=self._listbox.yview)
+
+        self._refresh_listbox(values)
+        self._listbox.bind("<ButtonRelease-1>", self._on_listbox_select)
+        self._listbox.bind("<Return>",          self._on_listbox_select)
+        self._listbox.bind("<Escape>",          lambda _e: self._close_popup())
+
+        # Fecha ao clicar fora
+        self._popup.bind("<FocusOut>", self._on_popup_focus_out)
+
+    def _refresh_listbox(self, values: list[str]):
+        if not self._listbox:
+            return
+        self._listbox.delete(0, "end")
+        for v in values:
+            self._listbox.insert("end", v)
+        # Redimensiona popup
+        if self._popup and self._popup.winfo_exists():
+            w = self.winfo_width()
+            h = min(220, len(values) * 22 + 4)
+            x = self.winfo_rootx()
+            y = self.winfo_rooty() + self.winfo_height()
+            self._popup.geometry(f"{w}x{h}+{x}+{y}")
+
+    def _close_popup(self):
+        if self._popup and self._popup.winfo_exists():
+            self._popup.destroy()
+        self._popup   = None
+        self._listbox = None
+
+    def _on_listbox_select(self, _e=None):
+        if not self._listbox:
+            return
+        sel = self._listbox.curselection()
+        if sel:
+            value = self._listbox.get(sel[0])
+            self._var.set(value)
+            self._close_popup()
+            self.event_generate("<<ComboboxSelected>>")
+
+    def _focus_list(self, _e=None):
+        if self._popup and self._popup.winfo_exists() and self._listbox:
+            self._listbox.focus_set()
+            if self._listbox.size():
+                self._listbox.selection_set(0)
+                self._listbox.activate(0)
+
+    def _on_entry_return(self, _e=None):
+        filtered = self._filter_values(self._var.get())
+        if len(filtered) == 1:
+            self._var.set(filtered[0])
+            self._close_popup()
+            self.event_generate("<<ComboboxSelected>>")
+        else:
+            self._close_popup()
+
+    def _on_focus_out(self, _e=None):
+        self.after(200, self._close_popup)
+
+    def _on_popup_focus_out(self, _e=None):
+        self.after(200, self._close_popup)
+
+    def _on_entry_click(self, _e=None):
+        if self._entry.cget("state") == "readonly":
+            self._toggle_popup()
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -312,7 +508,7 @@ class TabCronologia(tk.Frame):
     Aba de Cronologia de Manutenções para o IFControll.
 
     Sub-abas:
-      1. Buscar / Lista  — pesquisa paginada por placa
+      1. Buscar / Lista  — pesquisa paginada por placa / situação
       2. Nova Manutenção — formulário de criação
       3. Detalhe / Edição — edição completa + histórico
       4. Estatísticas    — métricas por placa ou global
@@ -328,15 +524,20 @@ class TabCronologia(tk.Frame):
         self._last_total = 0
         self._last_rows: list = []
         self._last_query_placa = ""
+        self._last_query_situ  = ""   # v3.5
 
         # Cache Fulltrack
         self._clientes: list  = []
-        self._cli_placas: dict = {}       # cli_id_str → [placa, ...]
-        self._cbs_cliente: list = []      # todos os comboboxes de cliente
+        self._cli_placas: dict = {}
+        self._cbs_cliente: list = []   # lista de FilterableCombobox de cliente
+
+        # Cache situações
+        self._situacoes: list[str] = list(_SITUACOES_PADRAO)
 
         self._build()
         register_theme_listener(self._recolor)
         self.after(300, self._carregar_clientes_fulltrack)
+        self.after(500, self._carregar_situacoes)
 
     # ── Tema ─────────────────────────────────────────────────────────────────
 
@@ -355,6 +556,19 @@ class TabCronologia(tk.Frame):
             self.tree.tag_configure("normal",    background=C["surface2"])
         except Exception:
             pass
+
+    # ── Situações (API) ───────────────────────────────────────────────────────
+
+    def _carregar_situacoes(self):
+        """Carrega situações do banco via API e mescla com as padrão."""
+        def task():
+            resp = _cron_get("situacoes")
+            if resp.get("status") and resp.get("data"):
+                self._situacoes = resp["data"]
+            # Garante "Outros" sempre presente
+            if "Outros" not in self._situacoes:
+                self._situacoes.append("Outros")
+        threading.Thread(target=task, daemon=True).start()
 
     # ── Clientes Fulltrack ────────────────────────────────────────────────────
 
@@ -396,7 +610,7 @@ class TabCronologia(tk.Frame):
             except Exception:
                 pass
 
-    def _placas_do_cliente(self, cb_cliente: ttk.Combobox) -> list:
+    def _placas_do_cliente(self, cb_cliente: FilterableCombobox) -> list:
         val = cb_cliente.get()
         if "ID " not in val:
             return []
@@ -405,7 +619,6 @@ class TabCronologia(tk.Frame):
         except Exception:
             return []
         placas = list(self._cli_placas.get(cid, []))
-        # Fallback online apenas se o cache não retornou nada
         if not placas:
             try:
                 seen: set = set()
@@ -439,27 +652,28 @@ class TabCronologia(tk.Frame):
         f = tk.Frame(nb, bg=C["bg"])
         nb.add(f, text=" 🔍 Buscar / Lista ")
 
-        # ── Seletor cliente → placa ──────────────────────────────────────────
+        # ── Seletor cliente → placa (filtráveis) ────────────────────────────
         row_cli = tk.Frame(f, bg=C["surface3"])
         row_cli.pack(fill="x", padx=8, pady=(6, 2))
 
-        _lbl(row_cli, "Cliente (Fulltrack):", 9, col=C["text_mid"],
+        _lbl(row_cli, "Cliente:", 9, col=C["text_mid"],
              bg=C["surface3"]).pack(side="left", padx=(8, 4))
 
-        cb_cli_b = ttk.Combobox(row_cli, values=["⏳ Carregando..."],
-                                 width=34, state="readonly",
-                                 font=("Helvetica Neue", 9))
+        cb_cli_b = FilterableCombobox(
+            row_cli, values=["⏳ Carregando..."], width=34,
+            font=("Helvetica Neue", 9),
+        )
         cb_cli_b.set("⏳ Carregando...")
-        cb_cli_b.pack(side="left", padx=4, ipady=3)
+        cb_cli_b.pack(side="left", padx=4)
         self._cbs_cliente.append(cb_cli_b)
 
-        _lbl(row_cli, "Placa do cliente:", 9, col=C["text_mid"],
+        _lbl(row_cli, "Placa:", 9, col=C["text_mid"],
              bg=C["surface3"]).pack(side="left", padx=(12, 4))
 
-        cb_placa_cli_b = ttk.Combobox(row_cli, values=[], width=14,
-                                       state="readonly",
-                                       font=("Helvetica Neue", 9))
-        cb_placa_cli_b.pack(side="left", padx=4, ipady=3)
+        cb_placa_cli_b = FilterableCombobox(
+            row_cli, values=[], width=14, font=("Helvetica Neue", 9),
+        )
+        cb_placa_cli_b.pack(side="left", padx=4)
 
         def _on_cli_b(e=None):
             placas = self._placas_do_cliente(cb_cli_b)
@@ -492,7 +706,7 @@ class TabCronologia(tk.Frame):
         self.e_placa.pack(side="left", padx=6, ipady=4)
         self.e_placa.bind("<Return>", lambda _e: self._buscar(reset=True))
 
-        _lbl(ctrl, "Situação:", col=C["text_mid"]).pack(side="left", padx=(8, 2))
+        _lbl(ctrl, "Concluído:", col=C["text_mid"]).pack(side="left", padx=(8, 2))
         self.cb_situ = ttk.Combobox(ctrl, values=["Todos", "Abertos", "Concluídos"],
                                      width=12, state="readonly")
         self.cb_situ.set("Todos")
@@ -508,6 +722,11 @@ class TabCronologia(tk.Frame):
              lambda: self._buscar(reset=True), C["accent"]).pack(side="left", padx=6)
         _btn(ctrl, "📋 VER TODAS",
              self._listar_placas, C["surface3"], C["accent"]).pack(side="left", padx=4)
+
+        # ── BOTÃO CARREGAR POR SITUAÇÃO (v3.5) ──────────────────────────────
+        _btn(ctrl, "🗂 POR SITUAÇÃO",
+             self._popup_situacao, C["purple"]).pack(side="left", padx=4)
+
         self.lb_busca = _lbl(ctrl, "", col=C["text_dim"])
         self.lb_busca.pack(side="right")
 
@@ -521,6 +740,10 @@ class TabCronologia(tk.Frame):
 
         self.lb_page = _lbl(nav, "Página: —", 9, col=C["text_mid"], bg=C["surface3"])
         self.lb_page.pack(side="left", padx=10)
+
+        # Badge da situação ativa
+        self.lb_situ_ativa = _lbl(nav, "", 9, col=C["purple"], bg=C["surface3"])
+        self.lb_situ_ativa.pack(side="left", padx=6)
 
         _btn(nav, "📊 STATS",
              self._abrir_stats_da_placa, C["blue"]).pack(side="right", padx=4)
@@ -564,6 +787,135 @@ class TabCronologia(tk.Frame):
         _btn(act, "✔ CONCLUIR",    self._concluir_selecionada, C["success"]).pack(side="left", padx=4)
         _btn(act, "🗑 DELETAR",    self._deletar_selecionada,  C["danger"]).pack(side="left", padx=4)
 
+    # ── Popup de situação (v3.5) ──────────────────────────────────────────────
+
+    def _popup_situacao(self):
+        """Abre janela modal para escolher a situação a ser filtrada."""
+        win = tk.Toplevel(self)
+        win.title("Filtrar por Situação")
+        win.configure(bg=C["bg"])
+        win.resizable(False, False)
+        win.grab_set()
+
+        _lbl(win, "Selecione a situação:", 11, True, C["accent"]).pack(
+            anchor="w", padx=16, pady=(16, 8)
+        )
+
+        # Grade de botões — max 2 colunas
+        grid = tk.Frame(win, bg=C["bg"])
+        grid.pack(padx=16, pady=(0, 8))
+
+        situacoes = list(self._situacoes)
+
+        def _escolher(situ: str):
+            win.destroy()
+            self._last_query_situ = situ
+            label = f"Situação: {situ}"
+            self.lb_situ_ativa.config(text=label)
+            self._buscar_por_situacao(situ, reset=True)
+
+        for i, situ in enumerate(situacoes):
+            col_idx = i % 2
+            row_idx = i // 2
+            is_outros = situ.lower() == "outros"
+            bg_cor = C["surface3"] if not is_outros else C["warn"]
+            fg_cor = C["accent"]   if not is_outros else C["bg"]
+
+            btn = tk.Label(
+                grid, text=situ,
+                bg=bg_cor, fg=fg_cor,
+                font=("Helvetica Neue", 10, "bold"),
+                padx=20, pady=10, cursor="hand2", relief="flat",
+                width=18,
+            )
+            btn.grid(row=row_idx, column=col_idx, padx=6, pady=4, sticky="ew")
+            btn.bind("<Button-1>", lambda _e, s=situ: _escolher(s))
+
+        # Botão limpar filtro
+        sep = tk.Frame(win, bg=C["border"], height=1)
+        sep.pack(fill="x", padx=16, pady=(4, 0))
+
+        row_bot = tk.Frame(win, bg=C["bg"])
+        row_bot.pack(padx=16, pady=12, anchor="e")
+        _btn(row_bot, "✖ LIMPAR FILTRO",
+             lambda: (win.destroy(), self._limpar_filtro_situacao()),
+             C["surface3"], C["text_mid"]).pack(side="left", padx=6)
+        _btn(row_bot, "FECHAR",
+             win.destroy,
+             C["surface2"], C["text_mid"]).pack(side="left")
+
+    def _limpar_filtro_situacao(self):
+        self._last_query_situ = ""
+        self.lb_situ_ativa.config(text="")
+        if self._last_query_placa:
+            self._buscar(reset=True)
+
+    def _buscar_por_situacao(self, situacao: str, reset: bool = True):
+        """Busca registros filtrando pela situação escolhida no popup."""
+        try:
+            self._limit = int(self.cb_limit.get().strip())
+        except (ValueError, AttributeError):
+            self._limit = 50
+
+        if reset:
+            self._offset = 0
+
+        self.lb_busca.config(text="⏳ Buscando por situação...")
+
+        situ_concluido = self.cb_situ.get().strip()
+        concluido = None
+        if situ_concluido == "Abertos":
+            concluido = 0
+        elif situ_concluido == "Concluídos":
+            concluido = 1
+
+        limit  = self._limit
+        offset = self._offset
+        placa  = self.e_placa.get().strip().upper() or None
+
+        def task():
+            params: dict = {"situacao": situacao, "limit": limit, "offset": offset}
+            if placa:
+                params["placa"] = placa
+            if concluido is not None:
+                params["concluido"] = concluido
+
+            resp = _cron_get("listar", params)
+
+            if not resp.get("status"):
+                def _err():
+                    self.lb_busca.config(text="✖ Erro na busca")
+                    messagebox.showerror("Erro", resp.get("error") or "Erro ao listar")
+                self.after(0, _err)
+                return
+
+            data  = resp.get("data", {}) or {}
+            rows  = data.get("registros", []) or []
+            total = int(data.get("total") or len(rows))
+
+            self._last_rows  = rows
+            self._last_total = total
+            # Não sobrescreve _last_query_placa para manter paginação
+
+            tree_rows = self._montar_tree_rows(rows)
+
+            page  = (offset // max(1, limit)) + 1
+            pages = max(1, (total + limit - 1) // limit)
+
+            def _update():
+                for r in self.tree.get_children():
+                    self.tree.delete(r)
+                for tag, values in tree_rows:
+                    self.tree.insert("", "end", tags=(tag,), values=values)
+                self._last_total = total
+                self.lb_page.config(
+                    text=f"Página: {page}/{pages}  |  Total: {total}")
+                self.lb_busca.config(text=f"{len(rows)} registro(s) — situação: {situacao}")
+
+            self.after(0, _update)
+
+        threading.Thread(target=task, daemon=True).start()
+
     # ════════════════════════════════════════════════════════════════════════
     # SUB-ABA 2 — NOVA MANUTENÇÃO
     # ════════════════════════════════════════════════════════════════════════
@@ -583,7 +935,7 @@ class TabCronologia(tk.Frame):
         pad = tk.Frame(b, bg=C["bg"])
         pad.pack(fill="x", padx=20, pady=10)
 
-        # ── Seletor cliente/placa ────────────────────────────────────────────
+        # ── Seletor cliente/placa (filtráveis) ───────────────────────────────
         sec = tk.Frame(pad, bg=C["surface3"], highlightthickness=1,
                        highlightbackground=C["border"])
         sec.pack(fill="x", pady=(0, 10))
@@ -595,34 +947,37 @@ class TabCronologia(tk.Frame):
 
         _lbl(row_nc, "Cliente:", 9, col=C["text_mid"],
              bg=C["surface3"]).pack(side="left")
-        cb_cli_n = ttk.Combobox(row_nc, values=["⏳ Carregando..."],
-                                 width=30, state="readonly",
-                                 font=("Helvetica Neue", 9))
+        cb_cli_n = FilterableCombobox(
+            row_nc, values=["⏳ Carregando..."], width=30,
+            font=("Helvetica Neue", 9),
+        )
         cb_cli_n.set("⏳ Carregando...")
-        cb_cli_n.pack(side="left", padx=6, ipady=3)
+        cb_cli_n.pack(side="left", padx=6)
         self._cbs_cliente.append(cb_cli_n)
 
         _lbl(row_nc, "Placa:", 9, col=C["text_mid"],
              bg=C["surface3"]).pack(side="left", padx=(12, 4))
-        cb_placa_n = ttk.Combobox(row_nc, values=[], width=14,
-                                   state="readonly", font=("Helvetica Neue", 9))
-        cb_placa_n.pack(side="left", padx=4, ipady=3)
+        cb_placa_n = FilterableCombobox(
+            row_nc, values=[], width=14, font=("Helvetica Neue", 9),
+        )
+        cb_placa_n.pack(side="left", padx=4)
 
         btn_usar = _btn(row_nc, "↓ USAR ESTA PLACA", lambda: None,
                         C["surface2"], C["text_mid"], px=8, py=3)
         btn_usar.pack(side="left", padx=8)
 
-        # Campos do formulário
+        # Campos do formulário — rastreador_id adicionado (v3.5)
         self._nova_fields: dict[str, tk.Entry] = {}
         campos = [
-            ("Placa *",       "placa",        True),
-            ("Situação *",    "situacao",     True),
-            ("Criado Por *",  "criado_por",   True),
-            ("Quem Informou", "quem_informou",False),
-            ("Onde Está",     "onde_esta",    False),
-            ("Categoria",     "categoria",    False),
-            ("Prioridade",    "prioridade",   False),
-            ("Custo (R$)",    "custo",        False),
+            ("Placa *",            "placa",         True),
+            ("ID do Rastreador",   "rastreador_id", False),   # NOVO v3.5
+            ("Situação *",         "situacao",      True),
+            ("Criado Por *",       "criado_por",    True),
+            ("Quem Informou",      "quem_informou", False),
+            ("Onde Está",          "onde_esta",     False),
+            ("Categoria",          "categoria",     False),
+            ("Prioridade",         "prioridade",    False),
+            ("Custo (R$)",         "custo",         False),
         ]
         for label, key, obrig in campos:
             row = tk.Frame(pad, bg=C["bg"])
@@ -724,23 +1079,24 @@ class TabCronologia(tk.Frame):
 
         self._edit_fields: dict[str, tk.Entry] = {}
         edit_campos = [
-            ("ID",             "id",             True),
-            ("Placa",          "placa",          True),
-            ("Situação",       "situacao",       False),
-            ("Criado Por",     "criado_por",     False),
-            ("Quem Informou",  "quem_informou",  False),
-            ("Onde Está",      "onde_esta",      False),
-            ("Categoria",      "categoria",      False),
-            ("Prioridade",     "prioridade",     False),
-            ("Custo (R$)",     "custo",          False),
-            ("Data Cadastro",  "data_cadastro",  False),
-            ("Previsão",       "previsao",       False),
-            ("Data Conclusão", "data_conclusao", False),
+            ("ID",              "id",             True),
+            ("Placa",           "placa",          True),
+            ("ID do Rastreador","rastreador_id",  False),   # NOVO v3.5
+            ("Situação",        "situacao",       False),
+            ("Criado Por",      "criado_por",     False),
+            ("Quem Informou",   "quem_informou",  False),
+            ("Onde Está",       "onde_esta",      False),
+            ("Categoria",       "categoria",      False),
+            ("Prioridade",      "prioridade",     False),
+            ("Custo (R$)",      "custo",          False),
+            ("Data Cadastro",   "data_cadastro",  False),
+            ("Previsão",        "previsao",       False),
+            ("Data Conclusão",  "data_conclusao", False),
         ]
         for label, key, readonly in edit_campos:
             row = tk.Frame(lp, bg=C["bg"])
             row.pack(fill="x", pady=2)
-            _lbl(row, f"{label}:", 9, col=C["text_mid"], width=16).pack(side="left", anchor="w")
+            _lbl(row, f"{label}:", 9, col=C["text_mid"], width=18).pack(side="left", anchor="w")
             e = _ent(row)
             if readonly:
                 e.config(state="readonly", fg=C["text_dim"])
@@ -897,7 +1253,7 @@ class TabCronologia(tk.Frame):
         self.e_api_url.insert(0, _cron_url())
 
         _lbl(b, "Token:", 9, col=C["text_mid"]).pack(anchor="w", pady=(10, 2))
-        self.e_api_key = _ent(b, show="*")   # mascara o token na tela
+        self.e_api_key = _ent(b, show="*")
         self.e_api_key.pack(fill="x", ipady=5)
         self.e_api_key.insert(0, _cron_key())
 
@@ -912,7 +1268,6 @@ class TabCronologia(tk.Frame):
 
         def testar():
             _write(self.res_cfg, "⏳ Testando...", C["accent"])
-            # Aplica antes de testar
             _cred.CRON_API_URL = self.e_api_url.get().strip().rstrip("/")
             _cred.CRON_API_KEY = self.e_api_key.get().strip()
 
@@ -955,6 +1310,54 @@ class TabCronologia(tk.Frame):
         s.map(f"{name}.Treeview", background=[("selected", C["accent2"])])
 
     # ════════════════════════════════════════════════════════════════════════
+    # HELPER: monta linhas da árvore (reutilizado por _buscar e _buscar_por_situacao)
+    # ════════════════════════════════════════════════════════════════════════
+
+    def _montar_tree_rows(self, rows: list) -> list[tuple]:
+        tree_rows: list[tuple] = []
+        for m in rows:
+            conc = int(m.get("concluido") or 0)
+            tag  = "concluido" if conc else "aberto"
+
+            if not conc:
+                try:
+                    dt_str = str(m.get("data_cadastro") or m.get("created_at") or "")[:19]
+                    dt = datetime.strptime(dt_str, "%Y-%m-%d %H:%M:%S")
+                    if (datetime.now() - dt).days > 7 and not m.get("previsao"):
+                        tag = "urgente"
+                except ValueError:
+                    pass
+
+            sa = _safe(m.get("status_atual"))
+            if len(sa) > 60:
+                sa = sa[:60] + "…"
+
+            try:
+                custo_fmt = f"{float(m.get('custo') or 0):.2f}"
+            except (TypeError, ValueError):
+                custo_fmt = _safe(m.get("custo"))
+
+            dt_cad = m.get("data_cadastro") or m.get("created_at")
+            tree_rows.append((tag, (
+                _safe(m.get("id")),
+                _safe(m.get("placa")),
+                _safe(m.get("rastreador_id")),      # NOVO v3.5
+                _safe(m.get("situacao")),
+                _fmt_dt(dt_cad),
+                _safe(m.get("criado_por")),
+                _safe(m.get("quem_informou")),
+                _safe(m.get("onde_esta")),
+                sa,
+                _safe(m.get("categoria"), "Geral"),
+                _safe(m.get("prioridade"), "Normal"),
+                custo_fmt,
+                _fmt_date(m.get("previsao")),
+                _fmt_date(m.get("data_conclusao")),
+                "✔" if conc else "✗",
+            )))
+        return tree_rows
+
+    # ════════════════════════════════════════════════════════════════════════
     # BUSCA / PAGINAÇÃO
     # ════════════════════════════════════════════════════════════════════════
 
@@ -982,14 +1385,18 @@ class TabCronologia(tk.Frame):
         elif situ == "Concluídos":
             concluido = 1
 
-        # Captura antes de entrar na thread (evita race condition)
         limit  = self._limit
         offset = self._offset
+
+        # Situação ativa do filtro por situação
+        situacao_filtro = self._last_query_situ or None
 
         def task():
             params: dict = {"placa": placa, "limit": limit, "offset": offset}
             if concluido is not None:
                 params["concluido"] = concluido
+            if situacao_filtro:
+                params["situacao"] = situacao_filtro
 
             resp = _cron_get("listar", params)
 
@@ -1003,49 +1410,7 @@ class TabCronologia(tk.Frame):
             data  = resp.get("data", {}) or {}
             rows  = data.get("registros", []) or []
             total = int(data.get("total") or len(rows))
-
-            tree_rows: list[tuple] = []
-            for m in rows:
-                conc = int(m.get("concluido") or 0)
-                tag  = "concluido" if conc else "aberto"
-
-                # Detecta registros urgentes (aberto > 7 dias sem previsão)
-                if not conc:
-                    try:
-                        dt_str = str(m.get("data_cadastro") or m.get("created_at") or "")[:19]
-                        dt = datetime.strptime(dt_str, "%Y-%m-%d %H:%M:%S")
-                        if (datetime.now() - dt).days > 7 and not m.get("previsao"):
-                            tag = "urgente"
-                    except ValueError:
-                        pass
-
-                # Trunca status longo
-                sa = _safe(m.get("status_atual"))
-                if len(sa) > 60:
-                    sa = sa[:60] + "…"
-
-                try:
-                    custo_fmt = f"{float(m.get('custo') or 0):.2f}"
-                except (TypeError, ValueError):
-                    custo_fmt = _safe(m.get("custo"))
-
-                dt_cad = m.get("data_cadastro") or m.get("created_at")
-                tree_rows.append((tag, (
-                    _safe(m.get("id")),
-                    _safe(m.get("placa")),
-                    _safe(m.get("situacao")),
-                    _fmt_dt(dt_cad),
-                    _safe(m.get("criado_por")),
-                    _safe(m.get("quem_informou")),
-                    _safe(m.get("onde_esta")),
-                    sa,
-                    _safe(m.get("categoria"), "Geral"),
-                    _safe(m.get("prioridade"), "Normal"),
-                    custo_fmt,
-                    _fmt_date(m.get("previsao")),
-                    _fmt_date(m.get("data_conclusao")),
-                    "✔" if conc else "✗",
-                )))
+            tree_rows = self._montar_tree_rows(rows)
 
             page  = (offset // max(1, limit)) + 1
             pages = max(1, (total + limit - 1) // limit)
@@ -1066,30 +1431,41 @@ class TabCronologia(tk.Frame):
         threading.Thread(target=task, daemon=True).start()
 
     def _pag_first(self):
-        if not self._last_query_placa:
+        if not self._last_query_placa and not self._last_query_situ:
             return
         self._offset = 0
-        self._buscar(reset=False)
+        if self._last_query_situ and not self._last_query_placa:
+            self._buscar_por_situacao(self._last_query_situ, reset=False)
+        else:
+            self._buscar(reset=False)
 
     def _pag_prev(self):
-        if not self._last_query_placa:
+        if not self._last_query_placa and not self._last_query_situ:
             return
         self._offset = max(0, self._offset - self._limit)
-        self._buscar(reset=False)
+        if self._last_query_situ and not self._last_query_placa:
+            self._buscar_por_situacao(self._last_query_situ, reset=False)
+        else:
+            self._buscar(reset=False)
 
     def _pag_next(self):
-        if not self._last_query_placa:
+        if not self._last_query_placa and not self._last_query_situ:
             return
         nxt = self._offset + self._limit
         if self._last_total and nxt >= self._last_total:
             return
         self._offset = nxt
-        self._buscar(reset=False)
+        if self._last_query_situ and not self._last_query_placa:
+            self._buscar_por_situacao(self._last_query_situ, reset=False)
+        else:
+            self._buscar(reset=False)
 
     def _listar_placas(self):
         self.lb_busca.config(text="⏳ Carregando placas...")
         self.e_placa.delete(0, "end")
         self._last_query_placa = ""
+        self._last_query_situ  = ""
+        self.lb_situ_ativa.config(text="")
 
         def task():
             resp = _cron_get("placas")
@@ -1101,7 +1477,6 @@ class TabCronologia(tk.Frame):
                 return
 
             rows = resp.get("data") or []
-            # Monta uma linha por placa com colunas no formato da árvore
             tree_rows: list[tuple] = []
             for p in rows:
                 placa      = _safe(p.get("placa"))
@@ -1109,12 +1484,11 @@ class TabCronologia(tk.Frame):
                 pendentes  = p.get("pendentes", 0)
                 concluidos = p.get("concluidos", 0)
                 ultima     = _fmt_dt(p.get("ultima_manutencao"))
-                # Mapeia para as colunas da árvore
                 row_vals = (
-                    "—",           # ID
-                    placa,         # Placa
+                    "—", placa,
+                    "—",   # rastreador_id — não disponível no endpoint placas
                     f"Registros: {registros}  |  Pendentes: {pendentes}  |  Concluídos: {concluidos}",
-                    ultima,        # Data Cadastro (última)
+                    ultima,
                     "—", "—", "—", "—", "—", "—", "—", "—", "—",
                     f"{pendentes}P",
                 )
@@ -1199,12 +1573,13 @@ class TabCronologia(tk.Frame):
 
                 se("id",    _safe(m.get("id"), ""),    readonly=True)
                 se("placa", _safe(m.get("placa"), ""), readonly=True)
-                se("situacao",      _safe(m.get("situacao"), ""))
-                se("criado_por",    _safe(m.get("criado_por"), ""))
-                se("quem_informou", _safe(m.get("quem_informou"), ""))
-                se("onde_esta",     _safe(m.get("onde_esta"), ""))
-                se("categoria",     _safe(m.get("categoria"), "Geral"))
-                se("prioridade",    _safe(m.get("prioridade"), "Normal"))
+                se("rastreador_id",  _safe(m.get("rastreador_id"), ""))   # NOVO v3.5
+                se("situacao",       _safe(m.get("situacao"), ""))
+                se("criado_por",     _safe(m.get("criado_por"), ""))
+                se("quem_informou",  _safe(m.get("quem_informou"), ""))
+                se("onde_esta",      _safe(m.get("onde_esta"), ""))
+                se("categoria",      _safe(m.get("categoria"), "Geral"))
+                se("prioridade",     _safe(m.get("prioridade"), "Normal"))
 
                 try:
                     se("custo", f"{float(m.get('custo') or 0):.2f}")
@@ -1223,7 +1598,6 @@ class TabCronologia(tk.Frame):
                     self.t_edit_obs.insert("1.0", obs)
                 self.t_novo_status.delete("1.0", "end")
 
-                # Histórico — usa campo criado_em (tabela status_update)
                 for r in self.tree_status.get_children():
                     self.tree_status.delete(r)
                 for upd in historico:
@@ -1261,6 +1635,7 @@ class TabCronologia(tk.Frame):
 
         body: dict = {
             "situacao":       self._edit_fields["situacao"].get().strip(),
+            "rastreador_id":  self._edit_fields["rastreador_id"].get().strip() or None,  # NOVO v3.5
             "criado_por":     self._edit_fields["criado_por"].get().strip() or "Sistema",
             "quem_informou":  self._edit_fields["quem_informou"].get().strip() or None,
             "onde_esta":      self._edit_fields["onde_esta"].get().strip() or None,
@@ -1437,7 +1812,7 @@ class TabCronologia(tk.Frame):
         win.title(f"Adicionar Status — #{mid}")
         win.configure(bg=C["bg"])
         win.geometry("520x340")
-        win.grab_set()  # modal
+        win.grab_set()
 
         _lbl(win, f"Adicionar status — manutenção #{mid}", 11, True,
              C["accent"]).pack(anchor="w", padx=12, pady=(12, 6))
@@ -1529,6 +1904,7 @@ class TabCronologia(tk.Frame):
 
         body: dict = {
             "placa":          placa,
+            "rastreador_id":  self._nova_fields["rastreador_id"].get().strip() or None,  # NOVO v3.5
             "situacao":       situacao,
             "criado_por":     criado_por,
             "quem_informou":  self._nova_fields["quem_informou"].get().strip() or None,
@@ -1569,7 +1945,7 @@ class TabCronologia(tk.Frame):
     # ════════════════════════════════════════════════════════════════════════
 
     _CSV_COLS = [
-        "id", "placa", "situacao", "data_cadastro", "criado_por",
+        "id", "placa", "rastreador_id", "situacao", "data_cadastro", "criado_por",
         "quem_informou", "onde_esta", "status_atual", "categoria",
         "prioridade", "custo", "previsao", "data_conclusao",
         "concluido", "observacoes",
@@ -1582,8 +1958,9 @@ class TabCronologia(tk.Frame):
         if modo == "pagina" and not self._last_rows:
             messagebox.showinfo("Exportar", "Nenhum dado na página atual.")
             return
-        if modo == "tudo" and not placa:
-            messagebox.showinfo("Exportar", "Informe a placa antes de exportar.")
+        if modo == "tudo" and not placa and not self._last_query_situ:
+            messagebox.showinfo("Exportar",
+                                "Informe a placa ou filtre por situação antes de exportar.")
             return
 
         path = filedialog.asksaveasfilename(
@@ -1609,13 +1986,14 @@ class TabCronologia(tk.Frame):
                 messagebox.showerror("Exportar", str(exc))
             return
 
-        # Modo "tudo" — paginado em background
-        situ = self.cb_situ.get().strip()
+        situ_conc = self.cb_situ.get().strip()
         concluido_filter = None
-        if situ == "Abertos":
+        if situ_conc == "Abertos":
             concluido_filter = 0
-        elif situ == "Concluídos":
+        elif situ_conc == "Concluídos":
             concluido_filter = 1
+
+        situacao_filter = self._last_query_situ or None
 
         def task():
             try:
@@ -1626,19 +2004,17 @@ class TabCronologia(tk.Frame):
                     offset = 0
                     total  = None
                     while True:
-                        params: dict = {
-                            "placa": placa, "limit": limit, "offset": offset
-                        }
+                        params: dict = {"limit": limit, "offset": offset}
+                        if placa:
+                            params["placa"] = placa
                         if concluido_filter is not None:
                             params["concluido"] = concluido_filter
+                        if situacao_filter:
+                            params["situacao"] = situacao_filter
                         resp = _cron_get("listar", params)
                         if not resp.get("status"):
-                            self.after(
-                                0, lambda: messagebox.showerror(
-                                    "Exportar",
-                                    resp.get("error", "Erro na API")
-                                )
-                            )
+                            self.after(0, lambda: messagebox.showerror(
+                                "Exportar", resp.get("error", "Erro na API")))
                             return
                         data  = resp.get("data", {}) or {}
                         regs  = data.get("registros", []) or []
@@ -1649,15 +2025,10 @@ class TabCronologia(tk.Frame):
                         offset += limit
                         if total and offset >= total:
                             break
-                self.after(
-                    0, lambda: messagebox.showinfo(
-                        "Exportar", f"CSV completo salvo:\n{path}"
-                    )
-                )
+                self.after(0, lambda: messagebox.showinfo(
+                    "Exportar", f"CSV completo salvo:\n{path}"))
             except OSError as exc:
-                self.after(
-                    0, lambda: messagebox.showerror("Exportar", str(exc))
-                )
+                self.after(0, lambda: messagebox.showerror("Exportar", str(exc)))
 
         threading.Thread(target=task, daemon=True).start()
 
