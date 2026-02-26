@@ -216,3 +216,78 @@ def find_vehicle(q: str) -> dict | None:
         if nq in re.sub(r"[^A-Z0-9]", "", str(ev.get("ras_vei_veiculo", "")).upper()):
             return ev
     return None
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# FUNÇÕES DA ABA CRONOLOGIA
+# ─────────────────────────────────────────────────────────────────────────────
+
+"""
+_api.py — Cliente HTTP para a API PHP de Cronologia.
+"""
+
+import requests
+import core.credencials as _cred
+
+
+def _cron_url() -> str:
+    return getattr(_cred, "CRON_API_URL", "")
+
+
+def _cron_key() -> str:
+    return getattr(_cred, "CRON_API_KEY", "")
+
+
+def _cron_headers() -> dict:
+    return {
+        "Content-Type": "application/json",
+        getattr(_cred, "_CRON_TOKEN_HEADER_NAME", "X-API-Token"): _cron_key(),
+    }
+
+
+def _cron_req(method: str, path: str, params: dict | None = None,
+              body: dict | None = None, timeout: int = 15):
+    try:
+        query = {"path": path}
+        if params:
+            query.update(params)
+        r = requests.request(
+            method=method.upper(),
+            url=_cron_url(),
+            headers=_cron_headers(),
+            params=query,
+            json=body,
+            timeout=timeout,
+        )
+        try:
+            data = r.json()
+        except Exception:
+            data = {
+                "status": False,
+                "error": f"Resposta não-JSON (HTTP {r.status_code})",
+                "raw": (r.text or "")[:4000],
+            }
+        return data, r.status_code
+    except requests.exceptions.ConnectionError:
+        return {"status": False, "error": "Sem conexão com a API."}, 0
+    except requests.exceptions.Timeout:
+        return {"status": False, "error": "Timeout na requisição."}, 0
+    except Exception as exc:
+        return {"status": False, "error": str(exc)}, 0
+
+
+def _cron_get(path: str, params: dict | None = None) -> dict:
+    data, _ = _cron_req("GET", path, params=params)
+    return data
+
+
+def _cron_post(path: str, body: dict | None = None, params: dict | None = None):
+    return _cron_req("POST", path, params=params, body=body)
+
+
+def _cron_put(path: str, body: dict | None = None, params: dict | None = None):
+    return _cron_req("PUT", path, params=params, body=body)
+
+
+def _cron_delete(path: str, params: dict | None = None):
+    return _cron_req("DELETE", path, params=params)

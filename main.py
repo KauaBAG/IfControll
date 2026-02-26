@@ -12,7 +12,7 @@ from utils.theme_manager import C, mk_theme_btn, register_theme_listener, _repai
 from utils.auto_refresh_export import now_str, auto_refresh_loop, bind_global_copy, mk_refresh_controls
 
 from tabs import TAB_REGISTRY
-from tabs.cronologia import TabCronologia
+#from tabs.cronologia import TabCronologia
 
 
 # ── Referência global ao notebook (necessária para reestilizar as abas) ───────
@@ -35,7 +35,6 @@ def build_window() -> tk.Tk:
     root.minsize(1024, 650)
     _root = root
     return root
-
 
 def build_header(root: tk.Tk) -> None:
     hdr = tk.Frame(root, bg=C["surface"], height=52)
@@ -92,8 +91,6 @@ def build_notebook(root: tk.Tk) -> ttk.Notebook:
 
     for name, cls in TAB_REGISTRY:
         nb.add(cls(nb), text=name)
-
-    nb.add(TabCronologia(nb), text=" 📋 Cronologia ")
     return nb
 
 

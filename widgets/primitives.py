@@ -1,16 +1,17 @@
 """
 widgets/primitives.py
-Componentes atômicos de UI: labels, entries, buttons, textboxes.
+Componentes atômicos de UI: labels, entries, buttons, textboxes, scrollables,
+treeview styles.
 Todos dependem de theme_manager.C para cores e se registram para
 recoloração automática quando o tema muda.
 """
 
 import tkinter as tk
+from tkinter import ttk
 from utils.theme_manager import C, register_theme_listener
 
 # ── Rastreamento de widgets para recoloração dinâmica ─────────────────────────
 # Cada entrada: (widget_ref, fn_recolor)
-# Usamos lista de tuplas com funções de recolor específicas por widget
 _tracked: list = []
 
 
@@ -23,7 +24,6 @@ def _recolor_all():
             fn()
         except Exception:
             dead.append(i)
-    # Remove widgets destruídos (de trás pra frente)
     for i in reversed(dead):
         _tracked.pop(i)
 
@@ -50,13 +50,11 @@ def _lt(hex_color: str) -> str:
 def lbl(parent, text: str = "", size: int = 10, bold: bool = False,
         col=None, bg=None, **kw) -> tk.Label:
     """Label com recoloração automática de tema."""
-    # Guarda as chaves de cor (não o valor) para buscar sempre o atual
     col_key = None
     bg_key  = None
-    # Detecta se foram passadas chaves do dict C
     for k, v in C.items():
-        if v == col:   col_key = k
-        if v == bg:    bg_key  = k
+        if v == col: col_key = k
+        if v == bg:  bg_key  = k
 
     w = tk.Label(
         parent, text=text,
@@ -113,7 +111,6 @@ def ent(parent, w: int = None, **kw) -> tk.Entry:
 def btn(parent, text: str, cmd, bg=None, fg=None,
         px: int = 14, py: int = 6, w: int = None) -> tk.Label:
     """Botão (Label clicável) com hover e recoloração automática de tema."""
-    # Detecta a chave de cor no dict C, ou usa a cor literal
     col_key = None
     for k, v in C.items():
         if v == bg:
@@ -140,6 +137,42 @@ def btn(parent, text: str, cmd, bg=None, fg=None,
     def recolor():
         try:
             b.config(bg=_get_col())
+        except Exception:
+            pass
+
+    _track(b, recolor)
+    return b
+
+
+def btn2(parent, text: str, cmd, bg=None, fg=None) -> tk.Button:
+    """
+    Botão nativo tk.Button — útil quando se precisa de estado disabled,
+    relief raised/groove ou integração com grid managers que não funcionam
+    bem com Label clicável.
+    Inclui recoloração automática de tema.
+    """
+    col_key = None
+    for k, v in C.items():
+        if v == bg:
+            col_key = k
+            break
+
+    def _get_col():
+        return C[col_key] if col_key else (bg or C["accent"])
+
+    b = tk.Button(
+        parent, text=text, command=cmd,
+        bg=_get_col(), fg=fg or C["bg"],
+        activebackground=_get_col(),
+        activeforeground=fg or C["bg"],
+        relief="flat", bd=0, cursor="hand2",
+        font=("Helvetica Neue", 9, "bold"), padx=10, pady=6,
+    )
+
+    def recolor():
+        try:
+            col = _get_col()
+            b.config(bg=col, activebackground=col)
         except Exception:
             pass
 
@@ -180,8 +213,10 @@ def sec(parent, title: str, col=None):
 
 
 def txtbox(parent, h: int = 6):
-    """Frame + Text widget com scrollbar lateral.
-    Retorna (frame, text_widget). Ambos com recoloração automática."""
+    """
+    Frame + Text widget com scrollbar lateral.
+    Retorna (frame, text_widget). Ambos com recoloração automática.
+    """
     fr = tk.Frame(
         parent,
         bg=C["surface2"],
@@ -217,9 +252,75 @@ def txtbox(parent, h: int = 6):
     return fr, t
 
 
+def make_scrollable(parent):
+    """
+    Envolve um Frame pai num Canvas com scrollbar vertical e suporte a
+    MouseWheel. Retorna (canvas, inner_frame) onde inner_frame é onde
+    os filhos devem ser adicionados.
+    """
+    canvas = tk.Canvas(parent, bg=C["bg"], highlightthickness=0)
+    vsb = tk.Scrollbar(parent, orient="vertical", command=canvas.yview)
+    canvas.configure(yscrollcommand=vsb.set)
+    vsb.pack(side="right", fill="y")
+    canvas.pack(side="left", fill="both", expand=True)
+
+    inner = tk.Frame(canvas, bg=C["bg"])
+    win_id = canvas.create_window((0, 0), window=inner, anchor="nw")
+
+    inner.bind(
+        "<Configure>",
+        lambda _e: canvas.configure(scrollregion=canvas.bbox("all"))
+    )
+    canvas.bind(
+        "<Configure>",
+        lambda e: canvas.itemconfig(win_id, width=e.width)
+    )
+
+    def _on_wheel(event):
+        canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+
+    canvas.bind("<Enter>", lambda _e: canvas.bind_all("<MouseWheel>", _on_wheel))
+    canvas.bind("<Leave>", lambda _e: canvas.unbind_all("<MouseWheel>"))
+
+    def recolor():
+        try:
+            canvas.config(bg=C["bg"])
+            inner.config(bg=C["bg"])
+        except Exception:
+            pass
+
+    _track(canvas, recolor)
+    return canvas, inner
+
+
+def apply_treeview_style(name: str, hcol: str | None = None):
+    """
+    Aplica (ou re-aplica) um estilo ttk.Treeview nomeado.
+    Deve ser chamado tanto na criação quanto no callback de recolor do tema.
+
+    Exemplo:
+        apply_treeview_style("Cron", C["accent"])
+        tree = ttk.Treeview(parent, style="Cron.Treeview")
+    """
+    s = ttk.Style()
+    s.theme_use("clam")
+    s.configure(
+        f"{name}.Treeview",
+        background=C["surface2"], foreground=C["text"], rowheight=26,
+        fieldbackground=C["surface2"], borderwidth=0, font=("Consolas", 9),
+    )
+    s.configure(
+        f"{name}.Treeview.Heading",
+        background=C["surface3"], foreground=hcol or C["accent"],
+        font=("Helvetica Neue", 9, "bold"), borderwidth=0, relief="flat",
+    )
+    s.map(f"{name}.Treeview", background=[("selected", C["accent2"])])
+
+
 # ── Escrita no Text widget ────────────────────────────────────────────────────
 
 def write(t: tk.Text, text: str, col=None):
+    """Limpa e escreve texto no Text widget (mantém state=disabled quando não edita)."""
     t.config(state="normal")
     t.delete("1.0", "end")
     t.config(fg=col or C["text"])
@@ -228,12 +329,15 @@ def write(t: tk.Text, text: str, col=None):
 
 
 def loading(t: tk.Text):
+    """Atalho: exibe mensagem de carregamento no Text widget."""
     write(t, "⏳  Aguardando API...", C["accent"])
 
 
 def err(t: tk.Text, msg: str):
+    """Atalho: exibe mensagem de erro no Text widget."""
     write(t, f"✖  {msg}", C["danger"])
 
 
 def ok(t: tk.Text, msg: str):
+    """Atalho: exibe mensagem de sucesso no Text widget."""
     write(t, f"✔  {msg}", C["success"])
