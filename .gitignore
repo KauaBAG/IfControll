@@ -1,0 +1,24 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyc
+
+# PyInstaller
+build/
+dist/
+*.spec.bak
+
+# Arquivos compilados/pacotes
+*.exe
+*.rar
+*.zip
+
+# Ambiente
+.env
+*.ini
+venv/
+.venv/
+
+# IDE
+.vscode/
+.idea/
