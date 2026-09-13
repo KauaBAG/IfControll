@@ -1,5 +1,5 @@
 """
-main.py — IFControll v3.0
+main.py — IFControll v1.0
 Ponto de entrada: janela principal, header, notebook e footer.
 Toda a lógica de aba está em tabs/, UI em widgets/, API em core/.
 """

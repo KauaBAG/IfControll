@@ -1,4 +1,4 @@
-# IFControll v3.0 — Fleet Intelligence Platform
+# IFControll v1.0 — Fleet Intelligence Platform
 ## Worktree Modular
 
 ```

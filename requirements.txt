@@ -1,0 +1,7 @@
+requests
+tkinter
+datetime
+python-dotenv
+collections
+typing
+math
